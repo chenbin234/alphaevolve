@@ -39,10 +39,19 @@ def main(argv: Sequence[str]) -> None:
   # Configure basic logging
   logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-  problem_config_path = args.problem_config
+  # Paths inside the code and the problem configs (e.g. `program_path`,
+  # `requirements.txt`) are relative to this directory, so the config path is
+  # resolved first (relative to the caller's cwd, falling back to this
+  # directory) and then we chdir here. This lets run.py be invoked from any
+  # working directory.
+  src_dir = os.path.dirname(os.path.abspath(__file__))
+  problem_config_path = os.path.abspath(args.problem_config)
   if not os.path.exists(problem_config_path):
-    logging.error('Problem config file not found: %s', problem_config_path)
+    problem_config_path = os.path.join(src_dir, args.problem_config)
+  if not os.path.exists(problem_config_path):
+    logging.error('Problem config file not found: %s', args.problem_config)
     sys.exit(1)
+  os.chdir(src_dir)
 
   with open(problem_config_path, 'r') as f:
     problem_config_yaml = f.read()
