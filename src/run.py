@@ -31,7 +31,7 @@ def main(argv: Sequence[str]) -> None:
   parser.add_argument(
       '--problem_config',
       type=str,
-      required=True,
+      default='src/data/problem_config/circle_packing.yaml',
       help='Path to the .yaml problem config file.',
   )
   args = parser.parse_args(argv[1:])
