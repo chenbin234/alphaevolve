@@ -103,7 +103,92 @@ How to read it:
 - **The counter is shared.** The 100 steps are the total for all four loops.
   Faster loops simply do more of them.
 
-### 2.2 The four loops over time
+### 2.2 Inside the program database
+
+The top box in 2.1 is a single Python object, `GreedyAndIslandsDatabase`, held
+in memory. It stores `Program` records:
+
+```
+One entry in the database = one Program record (evolution_database.py:31):
+┌────────────────────────────────────────────────────────────────────────────┐
+│ text          the full source code, including evaluate()                   │
+│ scores        {"sum_of_radii": 1.41}, from scores_to_maximize              │
+│ output        output_artifacts from evaluate(), or None                    │
+│ sampled_from  ┐ both None while stored. sample_programs() fills them in    │
+│ island_index  ┘ on the copies it returns, as the child's return address.   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+Here is a made-up snapshot of a circle-packing run after ten successful steps.
+It continues the worked example in section 5.7. The letters are names for this
+example, and `<-A` means "made from parent A".
+
+```
+┌──────────── GreedyAndIslandsDatabase: one Python object, in memory ────────────┐
+│                                                                                │
+│ _best_programs_per_metric: the "hall of fame", a dict with one key per metric  │
+│ ┌──────────────────────────────────────────────────────────────────────────┐   │
+│ │ "sum_of_radii" ──► F 1.41                                                │   │
+│ └──────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                │
+│ _islands: a list of 5 lists. Children are only ever appended.                  │
+│ ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐   │
+│ │ island 0     │ island 1     │ island 2     │ island 3     │ island 4     │   │
+│ ├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤   │
+│ │ S 0.96       │ S 0.96       │ S 0.96       │ S 0.96       │ S 0.96       │   │
+│ │ G 1.02 <-S   │              │ A 1.20 <-S   │ H -inf <-S   │ D 1.05 <-S   │   │
+│ │              │              │ C 0.50 <-A   │ I 1.10 <-S   │ J 1.12 <-D   │   │
+│ │              │              │ E 1.33 <-A   │              │              │   │
+│ │              │              │ F 1.41 <-E   │              │              │   │
+│ └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘   │
+│                                                                                │
+│ _last_reset_time: when the run started, or the last reset. Two hours later     │
+│ the islands are rebuilt.                                                       │
+└────────────────────────────────────────────────────────────────────────────────┘
+  Not stored anywhere: B 1.10 <-A (a hall-of-fame step that did not beat the
+  record) and every failed step.
+```
+
+Reading the snapshot:
+
+- **The letters and the `<-` marks are only for reading.** The database stores
+  no names, ids or parent links. It knows only each program's text, scores and
+  output.
+- **`S` is on every island.** The constructor put a copy of the seed on each
+  one. Island 1 hasn't produced a child yet, so the seed is all it has.
+- **Island 2 has been the busiest.** It has the most programs and produced the
+  current champion `F`. Its lineage runs S → A → E → F, so `F` is the seed's
+  great-grandchild.
+- **`H` scored `-inf` (an invalid packing) and is still kept.** Islands never
+  reject a child. They just rarely pick a weak one.
+- **`F` is stored twice:** on island 2, because its parent came from there, and
+  in the hall of fame, because it set a record. The earlier record holders `S`,
+  `A` and `E` lost their hall-of-fame slot but still live on their islands.
+- **`B` is nowhere.** It came from a hall-of-fame step and didn't beat the
+  record, so it was thrown away.
+
+Each step reads the database once and writes to it once:
+
+```
+READ: sample_programs()                  WRITE: register_program(child)
+───────────────────────                  ──────────────────────────────
+coin flip                                the child carries its parent's tag
+├─ heads: hall of fame ──► [F]           ├─ tag "island 2":
+│    parent F, no inspirations           │    append to island 2, and also
+└─ tails: 1 of the 5 islands, at random  │    copy to hall of fame if > 1.41
+     island 2 ──► [F, E, A, S, C]        └─ tag "hall of fame":
+       parent F 66%, E 27%, A 7%              copy to hall of fame if > 1.41,
+       (the other 4 are inspirations)         otherwise throw it away
+     island 1 ──► [S]
+       parent S, no inspirations
+```
+
+The odds for island 2 come from running the real `_temperature_sample` on these
+five scores. With only one metric, the hall of fame always holds exactly one
+program, so a heads step never has inspirations. Section 5 covers the rules in
+full.
+
+### 2.3 The four loops over time
 
 LLM replies and evaluations take different amounts of time, so the loops soon
 drift out of phase:
@@ -134,7 +219,7 @@ the others.
   The other loops are cancelled mid-step and their unfinished children are
   thrown away (section 7.3).
 
-### 2.3 Zoom in: one step inside one loop
+### 2.4 Zoom in: one step inside one loop
 
 Each box in 2.1 runs this pipeline once per step:
 
