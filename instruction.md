@@ -48,7 +48,95 @@ The four classic parts of an evolutionary algorithm map onto modules like this:
 | Fitness function | `evaluator_client` runs the program's own `evaluate()` in Docker. |
 | Bookkeeping / budget | `logging` |
 
-One iteration ("step") of the loop:
+### 2.1 Four loops, one database
+
+`src/data/problem_config/circle_packing.yaml` sets the budget:
+
+```yaml
+budget:
+  num_llm_calls: 100   # total steps across ALL loops, not 100 per loop
+  num_coroutines: 4    # how many copies of step_loop run at the same time
+```
+
+`async_run` starts **4 copies of the same loop**, `step_loop`
+([alpha_evolve.py:122](src/alpha_evolve.py#L122)). Each copy does one step at a
+time, and the four copies run side by side. They share one program database and
+one step counter:
+
+```
+┌───────────────── Program database: ONE, shared by all 4 loops ─────────────────┐
+│  best program for each metric ("hall of fame")     + 5 islands of programs     │
+└─┬─────────────▲──────┬─────────────▲──────┬─────────────▲──────┬─────────────▲─┘
+  │ parent      │      │ parent      │      │ parent      │      │ parent      │
+  │ + insp.     │      │ + insp.     │      │ + insp.     │      │ + insp.     │
+  ▼       child │      ▼       child │      ▼       child │      ▼       child │
+┌── coroutine 1 ┴─┐  ┌── coroutine 2 ┴─┐  ┌── coroutine 3 ┴─┐  ┌── coroutine 4 ┴─┐
+│ 1 sample        │  │ 1 sample        │  │ 1 sample        │  │ 1 sample        │
+│ 2 build prompt  │  │ 2 build prompt  │  │ 2 build prompt  │  │ 2 build prompt  │
+│ 3 await LLM     │  │ 3 await LLM     │  │ 3 await LLM     │  │ 3 await LLM     │
+│ 4 apply diffs   │  │ 4 apply diffs   │  │ 4 apply diffs   │  │ 4 apply diffs   │
+│ 5 await Docker  │  │ 5 await Docker  │  │ 5 await Docker  │  │ 5 await Docker  │
+│ 6 register      │  │ 6 register      │  │ 6 register      │  │ 6 register      │
+│   repeat from 1 │  │   repeat from 1 │  │   repeat from 1 │  │   repeat from 1 │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │                    │
+┌────────┴────────────────────┴────────────────────┴────────────────────┴────────┐
+│ logger.total_steps, also shared: one pass through 1-6 is ONE step (one LLM     │
+│ call) and adds 1, whether it succeeded or failed. Each loop checks it before   │
+│ every step and stops at 100.                                                   │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+How to read it:
+
+- **▼ (sample):** one `sample_programs()` call returns a parent plus up to 4
+  inspirations. All of them go into **one** prompt, which gets **one** LLM call
+  and produces **one** child. The inspirations are context only: the diff is
+  applied to the parent alone.
+- **▲ (register):** `register_program(child)` puts the child into the shared
+  database. Any loop, not just the one that made it, can pick it on its next ▼.
+- **Inside a box, everything is serial.** A loop never has two steps in flight.
+  It also keeps no memory between steps: it has no lineage and no island of its
+  own, and every ▼ is a fresh draw from the database as it is at that moment.
+- **Across boxes, steps overlap.** Up to 4 steps are in flight at once, so up to
+  4 Gemini requests and 4 Docker containers can be running at the same time.
+- **The counter is shared.** The 100 steps are the total for all four loops.
+  Faster loops simply do more of them.
+
+### 2.2 The four loops over time
+
+LLM replies and evaluations take different amounts of time, so the loops soon
+drift out of phase:
+
+```
+time ────────────────────────────────────────────────────────────────────────────►
+coroutine 1  S P[ LLM ····· ]A[ Docker ······· ]R S P[ LLM ········ ]A[ Docker ···
+coroutine 2  S P[ LLM ········· ]A[ Docker ·········· ]R S P[ LLM ··· ]A[ Docker ·
+coroutine 3  S P[ LLM ··· ]A[ Docker ························ ]R S P[ LLM ········
+coroutine 4  S P[ LLM ····· ]A S P[ LLM ······· ]A[ Docker ········ ]R S P[ LLM ··
+                             ▲ b                ▲ a
+```
+
+`S` = sample, `P` = build prompt, `A` = apply diffs, `R` = register. These are
+plain Python calls on the event-loop thread and finish almost instantly. The
+bracketed parts are `await`s. While one loop waits there, the event loop runs
+the others.
+
+- **a:** coroutine 1 registers its child. The next `S` of coroutines 2 and 3
+  comes after this point, so either may get that child as a parent or as an
+  inspiration. Coroutine 4's second `S` came before it, so it could not.
+- **b:** coroutine 4's diff did not apply. The step counts as failed, nothing is
+  stored, and the loop starts its next step at once.
+- **At the very start**, all four loops sample a database that holds only the
+  seed program. The first four steps are therefore four independent edits of the
+  same parent, with no inspirations.
+- **At the end**, the run stops as soon as one loop finds the counter at 100.
+  The other loops are cancelled mid-step and their unfinished children are
+  thrown away (section 7.3).
+
+### 2.3 Zoom in: one step inside one loop
+
+Each box in 2.1 runs this pipeline once per step:
 
 ```
                  ┌──────────────────────────────────────────────────────────┐
@@ -89,9 +177,8 @@ One iteration ("step") of the loop:
                                  └───────────────────────────────┘
 ```
 
-Several of these loops run concurrently (`num_coroutines`, 4 by default). They
-all share one database, so one loop's child can become another loop's parent on
-the very next step. Section 7 covers this.
+Section 5 explains how the database picks and stores programs. Section 7
+explains the async machinery.
 
 ---
 
