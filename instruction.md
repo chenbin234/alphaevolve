@@ -357,9 +357,11 @@ inside `problem_description`.
     `step_loop`. Islands evolve independently, which keeps the population
     diverse.
   - Every `island_reset_interval_hours` (2 hours by default), all islands are
-    rebuilt from the top programs of each island.
+    rebuilt from each old island's best program plus a few random survivors
+    (section 5.6).
   - Every child is also offered to the best-per-metric set, and it enters only if
-    it beats the current best on some metric.
+    it beats the current best on some metric. Island membership has no such
+    test (section 5.5).
 
 `sample_programs` returns a list. `step_loop` treats the first element as the
 **parent** ("current program") and the rest as **inspirations** ("prior
@@ -603,27 +605,82 @@ Three details:
 
 ### 5.5 Placing a child: `register_program(child)`
 
-After the child is evaluated,
-[`register_program`](src/components/evolution_database.py#L166) reads its
-return address:
+**No new islands are ever created.** The database is built with 5 islands
+(`num_islands=5`,
+[evolution_database.py:148](src/components/evolution_database.py#L148)) and
+keeps exactly 5 for the whole run. This section is about when a *program* is
+added to an island, and when it enters the hall of fame. The two follow
+different rules. "Beat the record" is the hall-of-fame rule; islands have no
+score check at all.
 
-1. **Every child gets a shot at the hall of fame.** For each metric, if the
-   child is *strictly better* than the current record holder, it takes over that
-   slot.
-2. **If the parent came from an island,** the child is appended to that same
-   island **regardless of its score**.
-3. **If the parent came from the hall of fame,** the child is added to no
-   island. If it didn't set a record in step 1, it is **thrown away**.
+Only children that evaluated without an error get this far. A failed step (an
+LLM error, an unusable diff, a crash in Docker) never reaches the database: the
+loop logs the error and moves on.
 
-So the two sides follow different rules:
-- **The hall of fame branch is strict hill climbing:** beat the champion or be
-  forgotten.
-- **Islands never delete anyone** between resets. Weak programs stay but are
-  rarely chosen, because temperature sampling favours strong ones. Selection
-  pressure on islands comes from *who gets picked*, not from *who gets removed*.
+[`register_program`](src/components/evolution_database.py#L166) does three
+things in order:
 
-Programs whose evaluation fails with an error never reach `register_program`.
-The loop logs the error and moves on.
+```python
+def register_program(self, program):
+    self._register_to_best_programs_per_metric(program)            # A: hall of fame
+    if program.sampled_from == 'islands' and program.island_index is not None:
+        self._register_to_islands(program, program.island_index)   # B: island
+    self._maybe_reset_islands()                                     # C: reset (5.6)
+```
+
+**A. Hall of fame: beat the record**
+([lines 172-180](src/components/evolution_database.py#L172)).
+- For each metric, the child takes over that metric's slot only if its score is
+  **strictly higher** than the current record holder's. A tie isn't enough, and
+  a `None` score is skipped.
+- A record on **any** metric is enough, not just `main_metric_name`. With
+  several metrics, the hall of fame holds up to one program per metric.
+- It doesn't matter where the parent came from. Every child gets this chance.
+
+**B. Island: no score check**
+([lines 182-186](src/components/evolution_database.py#L182)).
+- The child goes to an island only if its parent was sampled from an island.
+  `step_loop` copies the parent's `sampled_from` and `island_index` onto the
+  child ([alpha_evolve.py:87](src/alpha_evolve.py#L87)). This is the return
+  address from section 5.3.
+- The child is then appended to **its parent's island, whatever it scored.** A
+  worse child is kept. So is an exact copy of the parent, which happens when the
+  LLM's edits changed nothing (gotcha 2 in section 8).
+- An island has no size limit and no duplicate check. Only a reset shrinks it.
+
+So where the child ends up depends only on these two questions:
+
+| Parent sampled from | Child beats a record? | Where the child ends up |
+|---|---|---|
+| island *i* | yes | hall of fame **and** island *i* |
+| island *i* | no | island *i* only |
+| hall of fame | yes | hall of fame only |
+| hall of fame | no | **nowhere**: the child is thrown away |
+
+In the snapshot in section 2.2, `F` is the first row, `C` and `H` are the
+second, and `B` is the fourth.
+
+Why it's designed this way:
+- **Each island is a separate lineage.** A child always stays on its parent's
+  island, so the 5 islands evolve independently and don't converge on the same
+  solution. Programs move between islands only at a reset.
+- **Islands keep weak programs on purpose,** for diversity. They never delete
+  anyone between resets. Weak programs stay but are rarely chosen as parents,
+  because temperature sampling at T = 0.1 favours strong ones (section 5.4).
+  Selection pressure on islands comes from *who gets picked*, not from *who
+  gets removed*.
+- **The hall of fame is strict hill climbing:** beat the champion or be
+  forgotten. Half of all steps start from it.
+
+**Seeing it in the logs.** With `logger: VerboseFileLogger`, every step in
+`logs/latest/coroutine_K.md` records this decision:
+- **section 2 · Sampling** says whether the parent came from an island or the
+  hall of fame,
+- **section 7 · Registration** says where the child went (for example
+  "Appended P0012 to island 3", a new hall-of-fame record, or "Not stored
+  anywhere" with the reason),
+- **section 1** is the database snapshot before the step, so you can watch the
+  islands grow.
 
 ### 5.6 Island reset: mixing the islands every 2 hours
 
@@ -632,21 +689,43 @@ After every registration,
 the clock. Once `island_reset_interval_hours` (2 by default) have passed,
 [`_reset_islands`](src/components/evolution_database.py#L259) does three things:
 
-1. From each island, it keeps about 5 survivors, using temperature sampling at
-   T = 1e-6. At that temperature the first pick is always the island's best.
-   Because of the `1e-6` floor, the other picks turn out roughly random.
+1. From each island, it keeps up to 5 survivors, using temperature sampling at
+   T = 1e-6. The first pick is always the island's best. The other picks are
+   random (see below).
 2. It merges all survivors and removes duplicates.
 3. It deals them back into 5 fresh islands round-robin, like dealing cards.
 
 ```
 before:  island 0: 40 programs   island 1: 35 programs   ...
-           ↓ keep ~5 each          ↓ keep ~5 each
+           ↓ keep ≤5 each          ↓ keep ≤5 each
 after:   each new island gets a mix of survivors from different old islands
 ```
 
-This is called **migration** in evolutionary algorithms. Weak programs are
-removed, the islands stay small, and good ideas from one team spread to the
+This is called **migration** in evolutionary algorithms. Most programs are
+removed, so the islands stay small, and each island's best spreads to the
 others, while each island still starts its next phase from varied material.
+
+**What a reset really keeps.** The docstring of `_reset_islands` says "top k
+programs per island", but only the first survivor is chosen by score. I ran the
+real `_temperature_sample` 20,000 times on one island of 10 programs scored 0
+to 9, drawing 5 at T = 1e-6:
+
+| Program's score | 9 (best) | 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 (worst) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| How often it was kept | **100%** | 45% | 44% | 45% | 44% | 45% | 44% | 44% | 45% | 44% |
+
+The cause is the `+ 1e-6` on
+[line 239](src/components/evolution_database.py#L239):
+- At T = 1e-6, the softmax gives the best program essentially all the
+  probability and every other program essentially 0.
+- The `+ 1e-6` then lifts all of those near-zero values to the same tiny
+  number.
+- Draws are without replacement. Once the best program is drawn, the rest all
+  have equal odds, so each of the other 9 has a 4-in-9 (≈44%) chance.
+
+So a reset keeps **each island's best plus 4 random programs**, not its top 5.
+That might be intended, since it keeps diversity through the reset, or it might
+be a bug.
 
 ### 5.7 A short worked example (circle packing, one metric)
 
