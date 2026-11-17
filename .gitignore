@@ -25,3 +25,5 @@ MANIFEST
 - [ ]
 tmp/
 test.py
+# Verbose run logs written by VerboseFileLogger
+logs/

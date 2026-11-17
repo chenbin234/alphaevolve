@@ -26,6 +26,7 @@ from components import llm_client
 from components import logging
 from components import parsing_utils
 from components import prompting
+from components import verbose_logging
 
 # Registries mapping configuration Enums to modules.
 _DATABASES = {
@@ -45,6 +46,7 @@ _EVALUATORS = {
 }
 _LOGGERS = {
     configuration.LoggerType.LOCAL: logging.LocalLogger,
+    configuration.LoggerType.VERBOSE_FILE: verbose_logging.VerboseFileLogger,
 }
 
 
@@ -56,20 +58,33 @@ async def step_loop(
     logger: logging.BaseLogger,
     problem_description: str,
     total_steps: int,
+    coroutine_index: int = 0,
 ) -> None:
   """Step loop of AlphaEvolve."""
   while logger.total_steps < total_steps:
+    # `trace` only observes the step (for logging); it never changes it.
+    trace = logger.begin_step(coroutine_index)
     root_individual, *previous_individuals = database.sample_programs()
+    trace.sampled(root_individual, previous_individuals)
     llm_sample, code = None, None
     prompt = prompt_sampler.sample_prompt(
         problem_description,
         root_individual,
         previous_individuals,
     )
+    trace.prompt_built(prompt)
     try:
       llm_sample = await llm.generate_async(prompt)
+      trace.llm_returned(llm_sample)
       code = parsing_utils.apply_diffs(root_individual.text, llm_sample)
+      trace.diffs_applied(code)
       scores, output = await evaluator.run_async(code, root_individual.output)
+      trace.evaluated(scores, output)
+    except asyncio.CancelledError:
+      # The run is ending (another coroutine used up the budget, or Ctrl+C):
+      # this in-flight step is discarded. Record where it stopped, re-raise.
+      trace.cancelled()
+      raise
     except (
         exceptions.CodeExecutionError,
         exceptions.LLMInferenceError,
@@ -79,6 +94,7 @@ async def step_loop(
     ) as e:
       tb = traceback.format_exc()
       logger.log_error(code, e, tb, prompt, llm_sample)
+      trace.failed(e, tb)
       continue
     program = evolution_database.Program(
         text=code,
@@ -89,6 +105,8 @@ async def step_loop(
     )
     database.register_program(program)
     logger.log_step(program, prompt, llm_sample)
+    trace.registered(program)
+  logger.log_loop_end(coroutine_index)
 
 
 async def async_run(
@@ -116,11 +134,18 @@ async def async_run(
       ],
       main_metric_name=config.problem_spec.main_metric_name,
   )
+  logger.log_run_start(
+      config=config,
+      database=database,
+      prompt_sampler=prompt_sampler,
+      llm=llm,
+      evaluator=evaluator,
+  )
 
   # Run the main loop in several parallel coroutines.
   futures = []
   async with asyncio.TaskGroup() as tg:
-    for _ in range(config.budget.num_coroutines):
+    for coroutine_index in range(config.budget.num_coroutines):
       futures.append(
           tg.create_task(
               step_loop(
@@ -131,6 +156,7 @@ async def async_run(
                   logger=logger,
                   problem_description=config.problem_spec.problem_description,
                   total_steps=config.budget.num_llm_calls,
+                  coroutine_index=coroutine_index,
               )
           )
       )

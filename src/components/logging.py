@@ -17,11 +17,52 @@
 
 import abc
 import collections
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import textwrap
 from typing import Any
 
 from components import evolution_database
+
+
+class StepTrace:
+  """Hooks that `step_loop` calls at each stage of one step.
+
+  `step_loop` gets one trace per step from `BaseLogger.begin_step` and calls
+  the methods below in the order the step runs. The default implementation
+  does nothing, so loggers that only count steps (e.g. `LocalLogger`) are not
+  affected. `verbose_logging.VerboseFileLogger` returns a trace that records
+  every stage, with timestamps, to a log file per coroutine.
+  """
+
+  def sampled(
+      self,
+      root_individual: evolution_database.Program,
+      previous_individuals: Sequence[evolution_database.Program],
+  ) -> None:
+    """Called right after `database.sample_programs()`."""
+
+  def prompt_built(self, prompt: str) -> None:
+    """Called right after the prompt is built, before awaiting the LLM."""
+
+  def llm_returned(self, llm_sample: str | None) -> None:
+    """Called right after `await llm.generate_async(...)` returns."""
+
+  def diffs_applied(self, code: str) -> None:
+    """Called after the LLM diffs are applied, before awaiting the evaluator."""
+
+  def evaluated(
+      self, scores: Mapping[str, float | None], output: Any | None
+  ) -> None:
+    """Called right after `await evaluator.run_async(...)` returns."""
+
+  def registered(self, program: evolution_database.Program) -> None:
+    """Called after the child is registered in the database and logged."""
+
+  def failed(self, error: Exception, traceback: str | None) -> None:
+    """Called when the step fails with a recoverable error."""
+
+  def cancelled(self) -> None:
+    """Called when the step is cancelled while awaiting the LLM or evaluator."""
 
 
 class BaseLogger(abc.ABC):
@@ -76,6 +117,34 @@ class BaseLogger(abc.ABC):
     """Closes the logger and flushes the logs."""
     # No action needed by default.
     pass
+
+  def log_run_start(self, *, config: Any, database: Any, **modules: Any):
+    """Called once, after the initial program is evaluated, before the loops.
+
+    Args:
+      config: The `configuration.Configuration` of the run.
+      database: The (shared) program database, already holding the seed.
+      **modules: The other modules of the run (llm, evaluator, ...).
+    """
+    # No action needed by default.
+    del config, database, modules  # Unused.
+
+  def begin_step(self, coroutine_index: int) -> StepTrace:
+    """Called by `step_loop` at the start of every step.
+
+    Args:
+      coroutine_index: Which copy of `step_loop` runs the step (0-based).
+
+    Returns:
+      A `StepTrace` that `step_loop` notifies as the step progresses.
+    """
+    del coroutine_index  # Unused.
+    return StepTrace()
+
+  def log_loop_end(self, coroutine_index: int) -> None:
+    """Called when a `step_loop` exits because the step budget is used up."""
+    # No action needed by default.
+    del coroutine_index  # Unused.
 
   def get_state(self) -> Mapping[str, Any]:
     return {

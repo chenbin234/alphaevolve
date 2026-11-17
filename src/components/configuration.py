@@ -39,6 +39,9 @@ class EvaluatorType(str, enum.Enum):
 
 class LoggerType(str, enum.Enum):
   LOCAL = 'LocalLogger'
+  # LocalLogger + one verbose Markdown log file per coroutine (see
+  # components/verbose_logging.py).
+  VERBOSE_FILE = 'VerboseFileLogger'
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

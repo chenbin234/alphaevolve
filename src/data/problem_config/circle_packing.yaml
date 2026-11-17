@@ -7,12 +7,12 @@ problem_spec:
   main_metric_name: "sum_of_radii"
 
 budget:
-  num_llm_calls: 100
-  num_coroutines: 4
+  num_llm_calls: 10
+  num_coroutines: 2
 
 modules:
   database: GreedyAndIslandsDatabase
   prompt_sampler: TemplatePromptSampler
   llm: GenAILLMClient
   evaluator: DockerEvaluator
-  logger: LocalLogger
+  logger: VerboseFileLogger  # or LocalLogger: console output only, no log files
