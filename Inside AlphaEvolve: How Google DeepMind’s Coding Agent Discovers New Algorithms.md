@@ -33,40 +33,53 @@ To emphasize, this article is **not about an AI that does everything for you** a
 
 <p align="center"><em>Figure 3. Three results reported in the AlphaEvolve paper.</em></p>
 
-## Part 2. How does AlphaEvolve find a better circle packing?
-![overall_architecture](assets/alphaevolve_overall_architecture.png)
+## Part 2. How does AlphaEvolve find a better algorithm? A circle packing example.
 
-<p align="center"><em>Figure 4. Overall architecture of AlphaEvolve.</em></p>
+### 2.1 What is the circle packing problem described in the paper?
+Imagine placing $n$ circles of different sizes inside a unit square, the square $[0, 1]^2$ whose sides have length 1. The goal is to make the sum of radius as large as possible:
 
-Imagine placing 28 circles of different sizes inside a unit square. They must fit within the square and avoid overlapping. The goal is to make the **sum of their radii** as large as possible. The demo starts with a simple program that places circles in a pattern. The walkthrough below uses the saved run in this checkout. In the paper, the authors report improved square packings for 26 and 32 circles. [Demo configuration](src/data/problem_config/circle_packing.yaml) · [Saved run](2026-11-17_11-39-05_circle_packing/overview.md) · [Paper, Appendix B.12](https://arxiv.org/abs/2506.13131)
+$$
+\begin{aligned}
+\text{maximize} \quad & \sum_{i=1}^{n} r_i \\
+\text{subject to} \quad & r_i \le x_i \le 1 - r_i, \quad r_i \le y_i \le 1 - r_i, && i = 1, \dots, n, \\
+& \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2} \ \ge\ r_i + r_j, && 1 \le i < j \le n, \\
+& r_i \ge 0, && i = 1, \dots, n.
+\end{aligned}
+$$
+
+Each constraint has a simple meaning:
+
+- **Inside the square.** A circle's centre must be at least one radius away from every side.
+- **No overlap.** Circles may touch, but they may not overlap.
+- **Non-negative radii.** A circle can shrink to a point, but its radius cannot be negative.
 
 ![Reconstructed 28-circle layouts in a unit square. The sparse seed scores 0.9598, and the denser best candidate scores 2.7161.](assets/circle-packing-before-after.png)
-
 <p align="center"><em>Figure 5. The 28-circle packing before and after 10 search steps.</em></p>
+
+### 2.2 How does AlphaEvolve approach the problem?
+![overall_architecture](assets/alphaevolve_overall_architecture.png)
+<p align="center"><em>Figure 4. Overall architecture of AlphaEvolve.</em></p>
+
+### 2.6 What does the program database store?
+
+The local database is a Python object in memory. Each record holds the full program, its scores, and any output saved by the evaluator. The database keeps a record holder for each score. When a parent comes from an island, its evaluated child joins that island even if it scores worse. A child of a record holder sampled from the best-program list earns a place in the database by setting a record. [Program database](src/components/evolution_database.py)
+
+![The final database holds P0010 as the overall best program. Island 2 still holds the seed and two evaluated descendants.](assets/program-database.png)
+
+<p align="center"><em>Figure 11. The program database at the end of the demo.</em></p>
+
 
 ### 2.1 What happens in one search step?
 
 AlphaEvolve evaluates the starting program, called the **seed**, before the search begins. Each step draws one program to edit, called the **parent**, and may also draw past programs for inspiration. The step ends by sending the evaluated program back to the database, which decides where to keep it. When the search ends, AlphaEvolve returns the best program for the main score. [Search loop](src/alpha_evolve.py)
 
 ![Sample a parent and examples, build a prompt, ask Gemini, apply the edits, evaluate the candidate, and register the result in the database.](assets/search-step.png)
-
 <p align="center"><em>Figure 6. One step of the search.</em></p>
-
-### 2.2 Why call it a prompt sampler?
-
-The prompt changes from step to step. It includes the problem description, the parent’s editable code and score, and up to four other programs with their scores. The sampler also picks wording from a set of options. One prompt might ask the model to combine ideas from earlier programs. Another might ask it to try a new optimization idea. Varying the examples and instructions gives the model different starting points. [Prompt sampler](src/components/prompting.py)
-
-![The prompt combines the problem description, parent, earlier programs, edit instructions, and wording sampled for that step.](assets/prompt-layers.png)
-
-<p align="center"><em>Figure 7. What goes into a prompt.</em></p>
 
 ### 2.3 What does the language model do?
 
 The Gemini client sends the prompt and receives proposed code edits. The model can adjust a small part of the code or introduce a different algorithm. In circle packing, for example, it can try staggered rows as a starting arrangement and add a numerical optimizer to move the circles. The evaluator then measures the effect of those changes. The client supports choosing among models with different probabilities, and the saved demo used one Gemini model. [Gemini client](src/components/llm_client.py) · [Saved run](2026-11-17_11-39-05_circle_packing/overview.md)
 
-![The seed places circles in rings and shrinks their radii. The model proposes trying several layouts, solving for radii, and moving the centers.](assets/model-proposal.png)
-
-<p align="center"><em>Figure 8. A model edit can change the algorithm.</em></p>
 
 ### 2.4 How does AlphaEvolve limit what the model can edit?
 
@@ -84,21 +97,10 @@ The model is asked to return `SEARCH` and `REPLACE` pairs. Each pair identifies 
 
 <p align="center"><em>Figure 10. Two ways to choose a parent.</em></p>
 
-### 2.6 What does the program database store?
-
-The local database is a Python object in memory. Each record holds the full program, its scores, and any output saved by the evaluator. The database keeps a record holder for each score. When a parent comes from an island, its evaluated child joins that island even if it scores worse. A child of a record holder sampled from the best-program list earns a place in the database by setting a record. [Program database](src/components/evolution_database.py)
-
-![The final database holds P0010 as the overall best program. Island 2 still holds the seed and two evaluated descendants.](assets/program-database.png)
-
-<p align="center"><em>Figure 11. The program database at the end of the demo.</em></p>
 
 ### 2.7 Why does AlphaEvolve evaluate programs in Docker?
 
 Each candidate runs in a fresh container with the same installed dependencies. This isolates generated code from the rest of the experiment and makes it easier to compare candidates in the same environment. The container has networking disabled and limits on memory, CPU, and execution time. The evaluator calls `evaluate()` and reads its scores and any optional output. For the 28-circle demo, `evaluate()` checks that the circles fit inside the square and do not overlap, then adds the radii. Invalid packings receive a score of negative infinity. [Docker evaluator](src/components/evaluator_client.py) · [Circle-packing evaluator](src/data/initial_programs/circle_packing.py)
-
-![A candidate enters a fresh Docker container with no network and resource limits. The evaluator returns a score and optional output.](assets/docker-evaluation.png)
-
-<p align="center"><em>Figure 12. A fresh Docker container for each candidate.</em></p>
 
 ### 2.8 How do new programs build on earlier ideas?
 
@@ -110,43 +112,19 @@ In the saved demo, the seed scored **0.9598**. After several invalid candidates,
 
 <p align="center"><em>Figure 13. The branch that produced the best candidate.</em></p>
 
-### 2.9 Why does AlphaEvolve rebuild its islands?
-
-With the default settings, the first registration after two hours triggers a reset. The database takes up to five programs from each island, with a strong preference for that island’s best program on the first draw. It removes duplicates and distributes the selected programs across fresh islands. This gives one island a chance to build on ideas from another and clears out much of the old population. The record holders are kept separately. [Island reset code](src/components/evolution_database.py#L252)
-
-![An illustrative three-island reset samples survivors, removes duplicates, and distributes candidates from different old islands across fresh islands.](assets/island-reset.png)
-
-<p align="center"><em>Figure 14. An island reset mixes surviving programs.</em></p>
-
-### 2.10 Why does AlphaEvolve use `asyncio`?
+### 2.10 Why does AlphaEvolve use `asyncio` module?
 
 An API request and a Docker evaluation can both take time. `asyncio` lets another search step make progress while one is waiting. The loops share the same database, so a newly scored program can become a parent as soon as it is registered. They also share a budget. In the saved run, two loops finished ten counted steps. One extra model call had already started when the run reached its limit, and that step was cancelled. [Search loop](src/alpha_evolve.py) · [Run summary](2026-11-17_11-39-05_circle_packing/overview.md#final-summary)
 
-![A timeline from the first 180 seconds of the saved run shows two loops waiting for Gemini at the same time, with short evaluation intervals.](assets/asyncio-run-timeline.png)
 
-<p align="center"><em>Figure 15. Two search steps overlapping with asyncio.</em></p>
-
-## Part 3. How could researchers use AlphaEvolve in their own work?
-
-For a PhD project, I would start with one part of an experiment that is easy to measure. Suppose I want a faster data loader. I could give the agent the current loader, test that each version returns the expected examples, and measure how long it takes to process a fixed workload. A promising edit could then be checked on another machine or a larger dataset.
-
-The same workflow could help test new training rules or numerical methods. Researchers would still choose the question, decide which comparisons are fair, and study why an improvement works. A log of the experiments makes it easier to turn a strong result into a follow-up question.
-
-![Start with the current data loader, check and time the proposed edits, then verify the strongest edit on another machine or a larger dataset.](assets/data-loader-experiment.png)
-
-<p align="center"><em>Figure 16. Testing a faster data loader.</em></p>
-
-## Part 4. What are the limits of AlphaEvolve?
+## Part 3. What are the limits of AlphaEvolve?
 
 - **The score guides the search.** A program can do well on a narrow test and perform poorly on new inputs. An independent test can check whether an apparent improvement holds up. For a mathematical construction, an independent verifier can check whether it meets all the stated conditions.
 - **Experiments have a cost.** Model calls and evaluations take time and compute. When candidates train a model or run a long simulation, the paper’s staged evaluation approach can screen candidates with cheaper tests before running expensive ones. [Paper, §2.4](https://arxiv.org/abs/2506.13131)
 - **Logs and checkpoints serve different purposes.** `LocalLogger` prints progress to the console. The `VerboseFileLogger` in this checkout writes Markdown traces, so records already written can survive shutdown. The search population lives in memory, and the runner has no built-in way to resume it from those logs. [File logger](src/components/verbose_logging.py) · [Runner](src/alpha_evolve.py)
 
-![Three limits of the workflow are whether results generalize, how much each trial costs, and whether an interrupted run can resume.](assets/limits-and-checks.png)
 
-<p align="center"><em>Figure 17. What a promising score leaves open.</em></p>
-
-## How could I organize a machine-learning experiment around this workflow?
+## Part 4. A new project template for research integrating AlphaEvolve
 
 For a machine-learning experiment, I would keep the part that changes small and make it easy to rerun the tests. A first experiment could evolve an image augmentation policy. The score could be validation accuracy under a fixed training budget, with training time recorded alongside it.
 
@@ -161,13 +139,9 @@ For a machine-learning experiment, I would keep the part that changes small and 
 
 I would first run the evaluator on the baseline, then give the agent a small budget. If it finds an improvement, I would rerun the best candidate and the baseline with the same set of seeds before reporting the result.
 
-![An image augmentation policy can change while training and validation stay fixed. An independent verifier compares the best candidate with the baseline.](assets/ml-experiment-structure.png)
-
-<p align="center"><em>Figure 18. A machine-learning experiment with one editable component.</em></p>
-
 ## Acknowledgments
-This article is a collaboration with Claude, a large language model developed by Anthropic, and GPT-6 Astra, a large language model developed by OpenAI. These models helped me summarize the findings of the AlphaEvolve paper, and all figures were created with their help. The ideas and opinions expressed in this article are my own.
+This article is a collaboration with Claude developed by Anthropic, and GPT-6 Astra developed by OpenAI. These models helped me summarize the findings of the AlphaEvolve paper, and all figures were created with their help. The ideas and opinions expressed in this article are my own.
 
 ## References
-1. A. Novikov et al. (2025), [*AlphaEvolve: A coding agent for scientific and algorithmic discovery*](https://doi.org/10.48550/arXiv.2506.13131). arXiv:2506.13131.
-2. Google DeepMind, [AlphaEvolve source code and verification notebooks](https://github.com/google-deepmind/alphaevolve).
+1\. A. Novikov et al. (2025), [*AlphaEvolve: A coding agent for scientific and algorithmic discovery*](https://doi.org/10.48550/arXiv.2506.13131). arXiv:2506.13131.  
+2\. Google DeepMind, [AlphaEvolve source code and verification notebooks](https://github.com/google-deepmind/alphaevolve).
